@@ -18,6 +18,38 @@ pub enum FrameTypeFilter {
     FdlStatus,
 }
 
+#[derive(Debug, Clone)]
+pub enum FilterWarning {
+    InvalidSlaveAddress(u8),
+    InvalidDiagCode(String),
+    FaultsOnlyOverridesDiag,
+    DiagIgnoredBecauseNoFaults,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FilterSpec {
+    pub slave_addresses: Vec<u8>,
+    pub frame_type: FrameTypeFilter,
+    pub diag_codes: Vec<u16>,
+    pub faults_only: bool,
+    pub limit: Option<usize>,
+    pub warnings: Vec<FilterWarning>,
+}
+
+impl FilterSpec {
+    pub fn is_empty(&self) -> bool {
+        self.slave_addresses.is_empty()
+            && matches!(self.frame_type, FrameTypeFilter::All)
+            && self.diag_codes.is_empty()
+            && !self.faults_only
+            && self.limit.is_none()
+    }
+
+    pub fn take_warnings(&mut self) -> Vec<FilterWarning> {
+        std::mem::take(&mut self.warnings)
+    }
+}
+
 #[derive(Clone, Debug, Parser)]
 #[command(
     name = "profibus-dp-analyzer",
@@ -140,6 +172,79 @@ impl ParseArgs {
     pub fn diag_code_filter(&self) -> Option<u16> {
         self.diag_filter.as_ref().and_then(|s| parse_hex_or_dec(s))
     }
+
+    pub fn normalize_into_filter_spec(self) -> FilterSpec {
+        let mut spec = FilterSpec::default();
+        spec.frame_type = self.frame_type;
+        spec.limit = self.limit.and_then(|n| if n > 0 { Some(n) } else { None });
+
+        let valid_slaves: Vec<u8> = self
+            .slave_filter
+            .into_iter()
+            .filter(|&addr| {
+                if addr > 126 {
+                    spec.warnings.push(FilterWarning::InvalidSlaveAddress(addr));
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        spec.slave_addresses = valid_slaves;
+
+        if let Some(raw) = &self.diag_filter {
+            let parsed = parse_diag_filter_list(raw);
+            if parsed.is_empty() {
+                spec.warnings
+                    .push(FilterWarning::InvalidDiagCode(raw.clone()));
+            } else {
+                spec.diag_codes = parsed;
+            }
+        }
+
+        spec.faults_only = self.faults_only;
+        if spec.faults_only && !spec.diag_codes.is_empty() {
+            spec.warnings.push(FilterWarning::FaultsOnlyOverridesDiag);
+        }
+
+        spec
+    }
+}
+
+fn parse_diag_filter_list(raw: &str) -> Vec<u16> {
+    raw.split(',')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                None
+            } else {
+                parse_hex_or_dec(part)
+            }
+        })
+        .collect()
+}
+
+pub fn format_filter_warning(w: &FilterWarning) -> String {
+    match w {
+        FilterWarning::InvalidSlaveAddress(addr) => {
+            format!(
+                "⚠  忽略无效从站地址 {} (PROFIBUS-DP 合法范围 0-126)",
+                addr
+            )
+        }
+        FilterWarning::InvalidDiagCode(raw) => {
+            format!(
+                "⚠  无法解析诊断码 '{}'，已忽略（合法格式: 4、0x0004、0x0004,0x001A）",
+                raw
+            )
+        }
+        FilterWarning::FaultsOnlyOverridesDiag => {
+            "⚠  --faults-only 已启用，按具体诊断码过滤将被扩展为任意非零诊断码".to_string()
+        }
+        FilterWarning::DiagIgnoredBecauseNoFaults => {
+            "⚠  诊断码过滤对非故障帧不生效".to_string()
+        }
+    }
 }
 
 pub fn parse_hex_or_dec(s: &str) -> Option<u16> {
@@ -177,5 +282,88 @@ mod tests {
         for f in &formats {
             assert!(matches!(f, _));
         }
+    }
+
+    fn make_parse_args(
+        slaves: Vec<u8>,
+        ft: FrameTypeFilter,
+        diag: Option<&str>,
+        faults: bool,
+        lim: Option<usize>,
+    ) -> ParseArgs {
+        ParseArgs {
+            file: None,
+            format: OutputFormat::Table,
+            slave_filter: slaves,
+            frame_type: ft,
+            diag_filter: diag.map(|s| s.to_string()),
+            faults_only: faults,
+            limit: lim,
+            verbose: false,
+            summary: false,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn test_filter_spec_empty() {
+        let args = make_parse_args(vec![], FrameTypeFilter::All, None, false, None);
+        let spec = args.normalize_into_filter_spec();
+        assert!(spec.is_empty());
+        assert!(spec.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_filter_spec_slave_validation() {
+        let args = make_parse_args(vec![3, 200, 5, 127], FrameTypeFilter::All, None, false, None);
+        let spec = args.normalize_into_filter_spec();
+        assert_eq!(spec.slave_addresses, vec![3, 5]);
+        assert_eq!(spec.warnings.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_spec_diag_multi_comma() {
+        let args = make_parse_args(
+            vec![],
+            FrameTypeFilter::All,
+            Some("0x0004, 0x1A , 26,invalid"),
+            false,
+            None,
+        );
+        let spec = args.normalize_into_filter_spec();
+        assert_eq!(spec.diag_codes, vec![4, 0x1A, 26]);
+        assert!(spec.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_filter_spec_diag_all_invalid_warns() {
+        let args = make_parse_args(vec![], FrameTypeFilter::All, Some("garbage"), false, None);
+        let spec = args.normalize_into_filter_spec();
+        assert!(spec.diag_codes.is_empty());
+        assert_eq!(spec.warnings.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_spec_faults_and_diag_warns() {
+        let args = make_parse_args(vec![], FrameTypeFilter::All, Some("0x0004"), true, None);
+        let spec = args.normalize_into_filter_spec();
+        assert!(spec.faults_only);
+        assert_eq!(spec.diag_codes, vec![4]);
+        let has_warning = spec
+            .warnings
+            .iter()
+            .any(|w| matches!(w, FilterWarning::FaultsOnlyOverridesDiag));
+        assert!(has_warning);
+    }
+
+    #[test]
+    fn test_filter_spec_limit_zero_becomes_none() {
+        let args = make_parse_args(vec![], FrameTypeFilter::All, None, false, Some(0));
+        let spec = args.normalize_into_filter_spec();
+        assert_eq!(spec.limit, None);
+
+        let args = make_parse_args(vec![], FrameTypeFilter::All, None, false, Some(10));
+        let spec = args.normalize_into_filter_spec();
+        assert_eq!(spec.limit, Some(10));
     }
 }

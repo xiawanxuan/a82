@@ -64,44 +64,43 @@ fn cmd_parse(
         all_frames.len().to_string().cyan()
     );
 
-    let filtered_frames = output::filter_frames(
-        &all_frames,
-        &parse_args.slave_filter,
-        parse_args.frame_type,
-        parse_args.diag_code_filter(),
-        parse_args.faults_only,
-    );
+    let verbose = parse_args.verbose;
+    let show_summary = parse_args.summary;
+    let output_format = parse_args.format;
+    let output_path = parse_args.output.clone();
 
-    let mut limited_frames: Vec<protocol_parser::ParsedFrame> = filtered_frames;
-    if let Some(limit) = parse_args.limit {
-        if limit > 0 {
-            limited_frames.truncate(limit);
-        }
+    let mut filter_spec = parse_args.normalize_into_filter_spec();
+
+    let warnings = output::drain_filter_warnings(&mut filter_spec);
+    for w in &warnings {
+        eprintln!("{}", w.yellow());
     }
+
+    let filtered_frames = output::filter_frames(&all_frames, &filter_spec);
 
     eprintln!(
         "{} {} 个帧",
         "过滤后匹配:".dimmed(),
-        limited_frames.len().to_string().cyan().bold()
+        filtered_frames.len().to_string().cyan().bold()
     );
 
     let templates = protocol_templates::ProtocolTemplates::new();
     let converter = pdo_converter::PdoConverter::new(templates);
-    let converted = converter.convert_frames(&limited_frames);
+    let converted = converter.convert_frames(&filtered_frames);
     let stats = output::compute_statistics(&all_frames, &converted);
 
-    let output_path_ref = parse_args.output.as_deref();
+    let output_path_ref = output_path.as_deref();
     output::render_output(
         &converted,
         &stats,
-        parse_args.format,
-        parse_args.verbose,
-        parse_args.summary,
+        output_format,
+        verbose,
+        show_summary,
         output_path_ref,
     )?;
 
-    if parse_args.output.is_some() {
-        let p = parse_args.output.unwrap();
+    if output_path.is_some() {
+        let p = output_path.unwrap();
         println!("{} {}", "✓ 结果已写入:".green().bold(), p.display().to_string().cyan());
     }
 

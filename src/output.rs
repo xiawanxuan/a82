@@ -1,6 +1,6 @@
-use crate::cli::{FrameTypeFilter, OutputFormat};
+use crate::cli::{FilterSpec, FilterWarning, FrameTypeFilter, OutputFormat, format_filter_warning};
 use crate::pdo_converter::{ConvertedPdoFrame, ConvertedValue};
-use crate::protocol_parser::ParsedFrame;
+use crate::protocol_parser::{FrameType, ParsedFrame};
 use crate::protocol_templates::ProtocolTemplates;
 use colored::*;
 use comfy_table::{Cell, ContentArrangement, Table};
@@ -23,40 +23,83 @@ pub struct StatisticsSummary {
     pub diagnostic_counts: HashMap<String, usize>,
 }
 
-pub fn filter_frames(
-    frames: &[ParsedFrame],
-    slave_filter: &[u8],
-    frame_type: FrameTypeFilter,
-    diag_filter: Option<u16>,
-    faults_only: bool,
-) -> Vec<ParsedFrame> {
-    frames
+fn frame_type_matches(filter: FrameTypeFilter, actual: FrameType) -> bool {
+    match filter {
+        FrameTypeFilter::All => true,
+        FrameTypeFilter::Srd => matches!(
+            actual,
+            FrameType::Srd | FrameType::SrdHigh | FrameType::SrdLow
+        ),
+        FrameTypeFilter::Sda => matches!(actual, FrameType::Sda),
+        FrameTypeFilter::Csf => matches!(actual, FrameType::Csf),
+        FrameTypeFilter::FdlStatus => matches!(actual, FrameType::FdlStatus),
+    }
+}
+
+fn diag_condition_satisfied(frame: &ParsedFrame, spec: &FilterSpec) -> bool {
+    if !spec.faults_only && spec.diag_codes.is_empty() {
+        return true;
+    }
+
+    let has_explicit_diag = !spec.diag_codes.is_empty();
+
+    if spec.faults_only {
+        if !frame.bus_fault {
+            return false;
+        }
+        if !has_explicit_diag {
+            return true;
+        }
+    }
+
+    if has_explicit_diag {
+        let frame_has_any_target = frame
+            .diagnostic_data
+            .iter()
+            .any(|d| spec.diag_codes.contains(&d.code));
+        if frame_has_any_target {
+            return true;
+        }
+        if !spec.faults_only && frame.diagnostic_data.is_empty() {
+            return true;
+        }
+        return false;
+    }
+
+    true
+}
+
+pub fn filter_frames(frames: &[ParsedFrame], spec: &FilterSpec) -> Vec<ParsedFrame> {
+    let mut result: Vec<ParsedFrame> = frames
         .iter()
         .filter(|f| {
-            if !slave_filter.is_empty() && !slave_filter.contains(&f.slave_address) {
+            if !spec.slave_addresses.is_empty()
+                && !spec.slave_addresses.contains(&f.slave_address)
+            {
                 return false;
             }
-            let ft_match = match frame_type {
-                FrameTypeFilter::All => true,
-                FrameTypeFilter::Srd => format!("{:?}", f.frame_type) == "Srd",
-                FrameTypeFilter::Sda => format!("{:?}", f.frame_type) == "Sda",
-                FrameTypeFilter::Csf => format!("{:?}", f.frame_type) == "Csf",
-                FrameTypeFilter::FdlStatus => format!("{:?}", f.frame_type) == "FdlStatus",
-            };
-            if !ft_match {
+            if !frame_type_matches(spec.frame_type, f.frame_type) {
                 return false;
             }
-            if let Some(code) = diag_filter {
-                if !f.diagnostic_data.iter().any(|d| d.code == code) {
-                    return false;
-                }
-            }
-            if faults_only && !f.bus_fault {
+            if !diag_condition_satisfied(f, spec) {
                 return false;
             }
             true
         })
         .cloned()
+        .collect();
+
+    if let Some(limit) = spec.limit {
+        result.truncate(limit);
+    }
+
+    result
+}
+
+pub fn drain_filter_warnings(spec: &mut FilterSpec) -> Vec<String> {
+    spec.take_warnings()
+        .iter()
+        .map(format_filter_warning)
         .collect()
 }
 
