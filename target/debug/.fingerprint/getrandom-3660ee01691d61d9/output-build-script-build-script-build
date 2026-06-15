@@ -1,0 +1,2 @@
+{"$message_type":"diagnostic","message":"option `-C link-self-contained` is not supported on this target","code":null,"level":"error","spans":[],"children":[],"rendered":"\u001b[1m\u001b[91merror\u001b[0m\u001b[1m\u001b[97m: option `-C link-self-contained` is not supported on this target\u001b[0m\n\n"}
+{"$message_type":"diagnostic","message":"aborting due to 1 previous error","code":null,"level":"error","spans":[],"children":[],"rendered":"\u001b[1m\u001b[91merror\u001b[0m\u001b[1m\u001b[97m: aborting due to 1 previous error\u001b[0m\n\n"}

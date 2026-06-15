@@ -1,0 +1,25 @@
+[package]
+name = "profibus-dp-analyzer"
+version = "1.0.0"
+edition = "2021"
+description = "PROFIBUS-DP 抓包二进制报文日志解析工具"
+authors = ["Industrial Automation Team"]
+license = "MIT"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+colored = "2.1"
+comfy-table = "7.1"
+rand = "0.9"
+
+[dev-dependencies]
+tempfile = "3.10"
