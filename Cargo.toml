@@ -20,6 +20,8 @@ serde_json = "1.0"
 colored = "2.1"
 comfy-table = "7.1"
 rand = "0.9"
+serialport = "4.6"
+signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3.10"

@@ -67,6 +67,9 @@ pub enum Command {
     #[command(about = "解析抓包文件并输出结果")]
     Parse(ParseArgs),
 
+    #[command(about = "实时捕获 PROFIBUS 总线流量并在线解析（串口 / UDP / 管道 / 文件流）")]
+    Live(LiveArgs),
+
     #[command(about = "列出内置的从站设备模板")]
     ListTemplates,
 
@@ -78,23 +81,7 @@ pub enum Command {
 }
 
 #[derive(Clone, Debug, Parser)]
-pub struct ParseArgs {
-    #[arg(
-        short,
-        long,
-        help = "输入的二进制抓包文件路径，不指定则从标准输入读取（支持管道）"
-    )]
-    pub file: Option<PathBuf>,
-
-    #[arg(
-        short,
-        long,
-        value_enum,
-        default_value_t = OutputFormat::Table,
-        help = "输出格式"
-    )]
-    pub format: OutputFormat,
-
+pub struct CommonFilterArgs {
     #[arg(
         short = 's',
         long,
@@ -115,7 +102,7 @@ pub struct ParseArgs {
     #[arg(
         short = 'd',
         long,
-        help = "按故障诊断码过滤，仅显示包含指定诊断码的帧，例如: -d 0x0004 或 -d 4"
+        help = "按故障诊断码过滤，仅显示包含指定诊断码的帧，例如: -d 0x0004 或 -d 4,0x1A"
     )]
     pub diag_filter: Option<String>,
 
@@ -131,48 +118,9 @@ pub struct ParseArgs {
 
     #[arg(long, default_value_t = false, help = "显示详细的原始字节数据")]
     pub verbose: bool,
-
-    #[arg(long, default_value_t = false, help = "输出统计汇总信息")]
-    pub summary: bool,
-
-    #[arg(
-        short,
-        long,
-        help = "将结果写入到指定文件而不是控制台"
-    )]
-    pub output: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Parser)]
-pub struct DiagHelpArgs {
-    #[arg(help = "要查询的诊断码，例如: 0x0004 或 4")]
-    pub code: Option<String>,
-}
-
-#[derive(Clone, Debug, Parser)]
-pub struct GenerateSampleArgs {
-    #[arg(
-        short,
-        long,
-        default_value = "sample_profibus_capture.bin",
-        help = "输出的示例抓包文件名"
-    )]
-    pub file: PathBuf,
-
-    #[arg(
-        short,
-        long,
-        default_value_t = 50,
-        help = "生成的帧数量"
-    )]
-    pub frames: usize,
-}
-
-impl ParseArgs {
-    pub fn diag_code_filter(&self) -> Option<u16> {
-        self.diag_filter.as_ref().and_then(|s| parse_hex_or_dec(s))
-    }
-
+impl CommonFilterArgs {
     pub fn normalize_into_filter_spec(self) -> FilterSpec {
         let mut spec = FilterSpec::default();
         spec.frame_type = self.frame_type;
@@ -208,6 +156,160 @@ impl ParseArgs {
         }
 
         spec
+    }
+}
+
+#[derive(Clone, Debug, Parser)]
+pub struct ParseArgs {
+    #[arg(
+        short,
+        long,
+        help = "输入的二进制抓包文件路径，不指定则从标准输入读取（支持管道）"
+    )]
+    pub file: Option<PathBuf>,
+
+    #[arg(
+        short,
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Table,
+        help = "输出格式"
+    )]
+    pub format: OutputFormat,
+
+    #[command(flatten)]
+    pub filter: CommonFilterArgs,
+
+    #[arg(long, default_value_t = false, help = "输出统计汇总信息")]
+    pub summary: bool,
+
+    #[arg(
+        short,
+        long,
+        help = "将结果写入到指定文件而不是控制台"
+    )]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum LiveSourceKind {
+    Serial,
+    Udp,
+    Stdin,
+    File,
+}
+
+#[derive(Clone, Debug, Parser)]
+pub struct LiveArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = LiveSourceKind::Stdin,
+        help = "实时捕获数据源类型"
+    )]
+    pub source: LiveSourceKind,
+
+    #[arg(
+        long,
+        help = "源地址/路径（串口: COM3 或 /dev/ttyUSB0；UDP: 0.0.0.0:9600；文件: sample.bin）"
+    )]
+    pub addr: Option<String>,
+
+    #[arg(
+        long,
+        default_value_t = 9600,
+        help = "串口波特率（9600 | 19200 | 93750 | 187500 | 500000 | 1500000 | 12000000）"
+    )]
+    pub baud: u32,
+
+    #[arg(
+        long,
+        default_value_t = 500,
+        help = "读取超时时间（毫秒）"
+    )]
+    pub timeout_ms: u64,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "文件模式下模拟真实时间流速（每帧间隔 20ms）"
+    )]
+    simulate: bool,
+
+    #[arg(
+        short,
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Table,
+        help = "输出格式"
+    )]
+    pub format: OutputFormat,
+
+    #[command(flatten)]
+    pub filter: CommonFilterArgs,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "每隔 N 帧打印一次状态统计（0 表示不打印）"
+    )]
+    pub stats_every: u64,
+
+    #[arg(
+        short,
+        long,
+        help = "将结果写入到指定文件而不是控制台"
+    )]
+    pub output: Option<PathBuf>,
+}
+
+impl LiveArgs {
+    pub fn simulate_realtime(&self) -> bool {
+        self.simulate
+    }
+}
+
+#[derive(Clone, Debug, Parser)]
+pub struct DiagHelpArgs {
+    #[arg(help = "要查询的诊断码，例如: 0x0004 或 4")]
+    pub code: Option<String>,
+}
+
+#[derive(Clone, Debug, Parser)]
+pub struct GenerateSampleArgs {
+    #[arg(
+        short,
+        long,
+        default_value = "sample_profibus_capture.bin",
+        help = "输出的示例抓包文件名"
+    )]
+    pub file: PathBuf,
+
+    #[arg(
+        short,
+        long,
+        default_value_t = 50,
+        help = "生成的帧数量"
+    )]
+    pub frames: usize,
+}
+
+impl ParseArgs {
+    pub fn diag_code_filter(&self) -> Option<u16> {
+        self.filter
+            .diag_filter
+            .as_ref()
+            .and_then(|s| parse_hex_or_dec(s))
+    }
+
+    pub fn normalize_into_filter_spec(self) -> FilterSpec {
+        self.filter.normalize_into_filter_spec()
+    }
+}
+
+impl LiveArgs {
+    pub fn normalize_into_filter_spec(self) -> FilterSpec {
+        self.filter.normalize_into_filter_spec()
     }
 }
 
@@ -294,15 +396,42 @@ mod tests {
         ParseArgs {
             file: None,
             format: OutputFormat::Table,
+            filter: CommonFilterArgs {
+                slave_filter: slaves,
+                frame_type: ft,
+                diag_filter: diag.map(|s| s.to_string()),
+                faults_only: faults,
+                limit: lim,
+                verbose: false,
+            },
+            summary: false,
+            output: None,
+        }
+    }
+
+    fn make_common_filter(
+        slaves: Vec<u8>,
+        ft: FrameTypeFilter,
+        diag: Option<&str>,
+        faults: bool,
+        lim: Option<usize>,
+    ) -> CommonFilterArgs {
+        CommonFilterArgs {
             slave_filter: slaves,
             frame_type: ft,
             diag_filter: diag.map(|s| s.to_string()),
             faults_only: faults,
             limit: lim,
             verbose: false,
-            summary: false,
-            output: None,
         }
+    }
+
+    #[test]
+    fn test_common_filter_spec_empty() {
+        let filter = make_common_filter(vec![], FrameTypeFilter::All, None, false, None);
+        let spec = filter.normalize_into_filter_spec();
+        assert!(spec.is_empty());
+        assert!(spec.warnings.is_empty());
     }
 
     #[test]

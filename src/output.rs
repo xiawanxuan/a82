@@ -586,3 +586,194 @@ impl ConditionalColor for String {
         self.clone().normal()
     }
 }
+
+pub struct LiveStreamWriter {
+    writer: Box<dyn Write>,
+    format: OutputFormat,
+    verbose: bool,
+    frame_count: u64,
+    first_frame: bool,
+    csv_header_written: bool,
+}
+
+impl LiveStreamWriter {
+    pub fn new(format: OutputFormat, verbose: bool, output_path: Option<&Path>) -> io::Result<Self> {
+        let writer: Box<dyn Write> = match output_path {
+            Some(p) => Box::new(File::create(p)?),
+            None => Box::new(io::stdout()),
+        };
+        Ok(Self {
+            writer,
+            format,
+            verbose,
+            frame_count: 0,
+            first_frame: true,
+            csv_header_written: false,
+        })
+    }
+
+    pub fn write_frame(&mut self, frame: &ConvertedPdoFrame) -> io::Result<()> {
+        self.frame_count += 1;
+        match self.format {
+            OutputFormat::Table => {
+                self.write_single_frame_table(frame)?;
+            }
+            OutputFormat::Json | OutputFormat::JsonPretty => {
+                self.write_single_frame_json(frame)?;
+            }
+            OutputFormat::Csv => {
+                self.write_single_frame_csv(frame)?;
+            }
+        }
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+
+    fn write_single_frame_table(&mut self, frame: &ConvertedPdoFrame) -> io::Result<()> {
+        let w = &mut self.writer;
+        let header_line = format!(
+            "═ 帧 #{:06}  时间: {}ms  从站: [{}] {} ({})  ═",
+            self.frame_count,
+            frame.timestamp,
+            frame.slave_address,
+            frame.slave_name,
+            frame.device_type
+        );
+        let line_len = header_line.chars().count();
+        writeln!(w, "{}", "═".repeat(line_len).blue())?;
+        writeln!(w, "{}", header_line.blue().bold())?;
+        writeln!(w, "{}", "═".repeat(line_len).blue())?;
+
+        let fault_marker = if frame.bus_fault {
+            format!(" {}", "✘ 故障!".red().bold())
+        } else {
+            format!(" {}", "✔ 正常".green())
+        };
+        writeln!(
+            w,
+            "  帧类型: {} | 服务原语: {}{}",
+            frame.frame_type.cyan(),
+            frame.service_primitive.magenta(),
+            fault_marker
+        )?;
+        if let Some(reason) = &frame.fault_reason {
+            writeln!(w, "  {}", format!("故障原因: {}", reason).red().bold())?;
+        }
+        writeln!(w)?;
+
+        if !frame.input_values.is_empty() {
+            writeln!(w, "  {}", "▶ 输入过程数据 (Input PDO)".green().bold())?;
+            render_pdo_table(w, &frame.input_values, self.verbose)?;
+            if self.verbose {
+                writeln!(w, "  {} {}", "原始HEX:".dimmed(), frame.raw_input_hex.dimmed())?;
+            }
+            writeln!(w)?;
+        }
+
+        if !frame.output_values.is_empty() {
+            writeln!(w, "  {}", "▶ 输出过程数据 (Output PDO)".yellow().bold())?;
+            render_pdo_table(w, &frame.output_values, self.verbose)?;
+            if self.verbose {
+                writeln!(w, "  {} {}", "原始HEX:".dimmed(), frame.raw_output_hex.dimmed())?;
+            }
+            writeln!(w)?;
+        }
+
+        if !frame.diagnostic_codes.is_empty() {
+            writeln!(w, "  {}", "▶ 诊断码 (Diagnostic Codes)".red().bold())?;
+            for (code, desc) in &frame.diagnostic_codes {
+                if *code == 0x0000 {
+                    writeln!(w, "     [0x{:04X}] {}", code, desc)?;
+                } else {
+                    writeln!(
+                        w,
+                        "     {} {}",
+                        format!("[0x{:04X}]", code).red().bold(),
+                        desc.red()
+                    )?;
+                }
+            }
+            writeln!(w)?;
+        }
+        Ok(())
+    }
+
+    fn write_single_frame_json(&mut self, frame: &ConvertedPdoFrame) -> io::Result<()> {
+        let json = if matches!(self.format, OutputFormat::JsonPretty) {
+            serde_json::to_string_pretty(frame)?
+        } else {
+            serde_json::to_string(frame)?
+        };
+        writeln!(self.writer, "{}", json)?;
+        Ok(())
+    }
+
+    fn write_single_frame_csv(&mut self, frame: &ConvertedPdoFrame) -> io::Result<()> {
+        if !self.csv_header_written {
+            writeln!(
+                self.writer,
+                "seq,timestamp,slave_address,slave_name,service_primitive,frame_type,bus_fault,fault_reason,input_hex,output_hex,diag_codes"
+            )?;
+            self.csv_header_written = true;
+        }
+        let diags = frame
+            .diagnostic_codes
+            .iter()
+            .map(|(c, _)| format!("0x{:04X}", c))
+            .collect::<Vec<_>>()
+            .join("|");
+        writeln!(
+            self.writer,
+            "{},{},{},{},{},{},{},{},{},{},{}",
+            self.frame_count,
+            frame.timestamp,
+            frame.slave_address,
+            csv_escape(&frame.slave_name),
+            frame.service_primitive,
+            frame.frame_type,
+            frame.bus_fault,
+            csv_escape(&frame.fault_reason.clone().unwrap_or_default()),
+            csv_escape(&frame.raw_input_hex),
+            csv_escape(&frame.raw_output_hex),
+            diags
+        )?;
+        Ok(())
+    }
+}
+
+pub fn render_live_status_line(
+    source_name: &str,
+    frames_parsed: u64,
+    bytes_received: u64,
+    frames_dropped: u64,
+    faults_detected: u64,
+) {
+    eprint!(
+        "\r{}  已解析: {} 帧  |  字节: {}  |  丢弃: {}  |  故障: {}  |  源: {}",
+        "●".green().bold(),
+        frames_parsed.to_string().cyan().bold(),
+        bytes_received.to_string().cyan(),
+        frames_dropped.to_string().yellow(),
+        faults_detected.to_string().red(),
+        source_name
+    );
+}
+
+pub fn render_live_header(source_name: &str, filter_active: bool) {
+    eprintln!("{}", "═".repeat(70).blue());
+    eprintln!(
+        "{}  正在实时捕获 PROFIBUS-DP 总线数据",
+        "📡".bold().cyan()
+    );
+    eprintln!("{}  数据源: {}", "   ".dimmed(), source_name.cyan());
+    if filter_active {
+        eprintln!("{}  过滤器已启用", "   ".dimmed());
+    }
+    eprintln!("{}  按 Ctrl+C 停止捕获", "   ".dimmed());
+    eprintln!("{}", "═".repeat(70).blue());
+    eprintln!();
+}
